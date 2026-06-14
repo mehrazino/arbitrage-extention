@@ -1,0 +1,600 @@
+// Content Script - Main Logic
+(function() {
+  'use strict';
+
+  // State Management
+  const state = {
+    isMonitoring: false,
+    currentPrice: null,
+    previousPrice: null,
+    lastSignificantPrice: null,
+    threshold: 5,
+    priceOffset: 0,
+    volume: 1,
+    volumeEnabled: true,
+    stopLossOffset: 2,
+    stopLossEnabled: true,
+    enableBuy: true,
+    enableSell: true,
+    useDemo: true,
+    autoTrading: true,
+    isRateGold: false,
+    isFarazGold: false,
+    hasOpenPosition: false,
+    hasOpenOrder: false,
+    priceCheckInterval: null,
+    statusCheckInterval: null,
+    priceObserver: null,
+    cachedPriceElement: null
+  };
+
+  // Initialize
+  function init() {
+    detectSite();
+    log('Content script initialized', 'info');
+    
+    if (state.isRateGold) {
+      log('RateGold detected', 'info');
+      // No immediate start here, wait for message or check if already monitoring
+      // But for robustness, we can try to find the element early
+    } else if (state.isFarazGold) {
+      log('FarazGold detected', 'info');
+      startStatusMonitoring();
+    }
+  }
+
+  // Detect which site we're on
+  function detectSite() {
+    const url = window.location.href;
+    state.isRateGold = url.includes('setinrate.com/room');
+    state.isFarazGold = url.includes('farazgold.com/room') || url.includes('demo.farazgold.com/room');
+  }
+
+  // Start monitoring price on RateGold
+  function startPriceMonitoring() {
+    // Clear existing interval if any (backward compatibility)
+    if (state.priceCheckInterval) {
+      clearInterval(state.priceCheckInterval);
+      state.priceCheckInterval = null;
+    }
+    
+    // Disconnect existing observer
+    if (state.priceObserver) {
+      state.priceObserver.disconnect();
+    }
+
+    // Try to find element immediately
+    let priceElement = findPriceElement();
+    
+    if (priceElement) {
+      setupObserver(priceElement);
+    } else {
+      // Fallback to polling until element is found
+      log('Price element not found yet, polling...', 'warning');
+      state.priceCheckInterval = setInterval(() => {
+        const el = findPriceElement();
+        if (el) {
+          clearInterval(state.priceCheckInterval);
+          state.priceCheckInterval = null;
+          setupObserver(el);
+        }
+      }, 500);
+    }
+  }
+  
+  function setupObserver(element) {
+    state.cachedPriceElement = element;
+    
+    // Create observer
+    state.priceObserver = new MutationObserver((mutations) => {
+      if (state.isMonitoring) {
+        checkPrice(element);
+      }
+    });
+    
+    // Start observing
+    state.priceObserver.observe(element, { 
+      characterData: true, 
+      childList: true, 
+      subtree: true 
+    });
+    
+    log('⚡ MutationObserver attached to price element', 'success');
+    
+    // Initial check
+    if (state.isMonitoring) {
+      checkPrice(element);
+    }
+  }
+
+  // Start monitoring status on FarazGold
+  function startStatusMonitoring() {
+    if (state.statusCheckInterval) {
+      clearInterval(state.statusCheckInterval);
+    }
+    
+    state.statusCheckInterval = setInterval(() => {
+      updatePositionStatus();
+    }, 500); // Check every 500ms
+  }
+
+  // Find the correct price element containing ":مظنه"
+  function findPriceElement() {
+    const elements = document.querySelectorAll('.last-price');
+    for (const el of elements) {
+      if (el.textContent.includes(':مظنه')) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  // Check price from RateGold
+  function checkPrice(elementOverride = null) {
+    try {
+      const priceElement = elementOverride || state.cachedPriceElement || findPriceElement();
+      
+      if (!priceElement) {
+        return;
+      }
+      
+      // Update cache if found manually
+      if (!state.cachedPriceElement && priceElement) {
+        state.cachedPriceElement = priceElement;
+      }
+      
+      const priceText = priceElement.textContent.trim();
+      const price = parsePrice(priceText);
+      
+      if (price === null || isNaN(price)) {
+        return;
+      }
+      
+      // Update current price
+      state.currentPrice = price;
+      
+      // Initialize previous price if not set
+      if (state.previousPrice === null) {
+        state.previousPrice = price;
+        state.lastSignificantPrice = price;
+        sendStatusUpdate();
+        return;
+      }
+      
+      // Calculate difference from last significant price
+      const diff = price - state.lastSignificantPrice;
+      const absDiff = Math.abs(diff);
+      
+      // Check if threshold is reached
+      if (absDiff > state.threshold) {
+        log(`🎯 Threshold reached! Price changed from ${state.lastSignificantPrice} to ${price} (diff: ${diff})`, 'warning');
+        
+        // Determine action
+        const action = diff > 0 ? 'BUY' : 'SELL';
+        
+        // Check if trade type is enabled
+        if (action === 'BUY' && !state.enableBuy) {
+          log(`⚠️ Buy signal detected but 'Buy' is disabled. Skipping...`, 'warning');
+          // Update significant price so we don't trigger again on the same move
+          state.lastSignificantPrice = price;
+          state.previousPrice = price;
+          sendStatusUpdate();
+          return;
+        }
+        
+        if (action === 'SELL' && !state.enableSell) {
+          log(`⚠️ Sell signal detected but 'Sell' is disabled. Skipping...`, 'warning');
+          // Update significant price so we don't trigger again on the same move
+          state.lastSignificantPrice = price;
+          state.previousPrice = price;
+          sendStatusUpdate();
+          return;
+        }
+        
+        // Check if we can trade
+        if (state.autoTrading && !state.hasOpenPosition && !state.hasOpenOrder) {
+          log(`📊 Initiating ${action} order...`, 'info');
+          
+          // Apply Price Offset
+          let entryPrice = state.lastSignificantPrice;
+          if (state.priceOffset) {
+            if (action === 'BUY') {
+              entryPrice += state.priceOffset;
+              log(`Applying price offset (+${state.priceOffset}): ${state.lastSignificantPrice} -> ${entryPrice}`, 'info');
+            } else if (action === 'SELL') {
+              entryPrice -= state.priceOffset;
+              log(`Applying price offset (-${state.priceOffset}): ${state.lastSignificantPrice} -> ${entryPrice}`, 'info');
+            }
+          }
+          
+          // Send trade signal to FarazGold tab
+          // NOTE: We use state.lastSignificantPrice (the price BEFORE the jump) as the entry price (adjusted by offset)
+          sendTradeSignal(action, entryPrice);
+          
+          // Disable auto trading and stop monitoring
+          state.autoTrading = false;
+          state.isMonitoring = false;
+          log('🛑 Trade initiated. Stopping monitoring system...', 'warning');
+          
+          // Notify runtime that monitoring stopped
+          chrome.runtime.sendMessage({
+            type: 'MONITORING_STOPPED'
+          }).catch(() => {});
+        } else {
+          if (state.hasOpenPosition || state.hasOpenOrder) {
+            log('⚠️ Cannot trade: Open position or order exists', 'warning');
+          } else if (!state.autoTrading) {
+            log('⚠️ Auto-trading is disabled', 'warning');
+          }
+        }
+      }
+      
+      // Always update last significant price to current price
+      // This ensures we track the price closely and only trigger on sudden jumps > threshold
+      state.lastSignificantPrice = price;
+      
+      // Update previous price
+      state.previousPrice = price;
+      
+      // Send status update
+      sendStatusUpdate();
+      
+    } catch (error) {
+      log(`Error checking price: ${error.message}`, 'error');
+    }
+  }
+
+  // Parse price from text (convert ۶۳٬۰۰۲ to 63002)
+  function parsePrice(priceText) {
+    if (!priceText) return null;
+    
+    // Replace Persian/Arabic digits with English
+    const persianDigits = ['۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'];
+    const arabicDigits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+    
+    let converted = priceText;
+    
+    persianDigits.forEach((digit, index) => {
+      converted = converted.replace(new RegExp(digit, 'g'), index.toString());
+    });
+    
+    arabicDigits.forEach((digit, index) => {
+      converted = converted.replace(new RegExp(digit, 'g'), index.toString());
+    });
+    
+    // Remove commas and any non-digit characters except dots
+    converted = converted.replace(/[^\d.]/g, '');
+    
+    const price = parseFloat(converted);
+    return isNaN(price) ? null : price;
+  }
+
+  // Send trade signal to FarazGold
+  async function sendTradeSignal(action, price) {
+    try {
+      const tabs = await chrome.runtime.sendMessage({ 
+        type: 'GET_FARAZGOLD_TAB',
+        useDemo: state.useDemo
+      });
+      
+      chrome.runtime.sendMessage({
+        type: 'EXECUTE_TRADE',
+        action: action,
+        price: price,
+        volume: state.volume,
+        volumeEnabled: state.volumeEnabled,
+        stopLossOffset: state.stopLossOffset,
+        stopLossEnabled: state.stopLossEnabled,
+        threshold: state.threshold,
+        useDemo: state.useDemo
+      });
+      
+    } catch (error) {
+      log(`Error sending trade signal: ${error.message}`, 'error');
+    }
+  }
+
+  // Execute trade on FarazGold
+  async function executeTrade(action, price, volume, volumeEnabled = true, stopLossOffset = 2, stopLossEnabled = true) {
+    try {
+      log(`🔧 Executing ${action} trade at ${price} with volume ${volume} (Enabled: ${volumeEnabled}), SL Offset: ${stopLossOffset}, SL Enabled: ${stopLossEnabled}`, 'info');
+      
+      // Cache elements if not already cached
+      const volumeInput = document.querySelector("#volume");
+      const priceInput = document.querySelector("#price");
+      const stopLossCheckbox = document.querySelector("#stop-loss-checkbox");
+      const stopLossInput = document.querySelector("#stop-loss");
+      
+      if (!volumeInput) throw new Error('Volume input not found');
+
+      // Step 1: Clear and set volume
+      if (volumeEnabled) {
+        if (volumeInput.value && volumeInput.value.trim() !== '') {
+          // log(`ℹ️ Volume already set to ${volumeInput.value}, skipping auto-fill`, 'info');
+        } else {
+          volumeInput.value = volume;
+          volumeInput.dispatchEvent(new Event('input', { bubbles: true }));
+          volumeInput.dispatchEvent(new Event('change', { bubbles: true }));
+          // Reduced sleep
+        }
+      }
+      
+      // Step 2: Clear and set price (optional)
+      if (priceInput) {
+        if (priceInput.value && priceInput.value.trim() !== '') {
+          // log(`ℹ️ Price already set to ${priceInput.value}, skipping auto-fill`, 'info');
+        } else {
+          priceInput.value = price;
+          priceInput.dispatchEvent(new Event('input', { bubbles: true }));
+          priceInput.dispatchEvent(new Event('change', { bubbles: true }));
+          // Reduced sleep
+        }
+      }
+      
+      // Step 3: Enable stop-loss checkbox
+      if (stopLossEnabled) {
+        if (stopLossCheckbox && !stopLossCheckbox.checked) {
+          stopLossCheckbox.click();
+          if (!stopLossCheckbox.checked) {
+             stopLossCheckbox.checked = true;
+             stopLossCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }
+        
+        // Use a short retry loop to find the input if it appears dynamically
+        // Optimized: Only query if needed, and do it fast.
+        let activeStopLossInput = document.querySelector("#stop-loss") || stopLossInput;
+        
+        // If not found, try a very short, non-blocking polling mechanism is not ideal for sync execution flow 
+        // needed for immediate trade.
+        // Instead, we assume if the checkbox is clicked, the input SHOULD appear.
+        // If the site uses a slight animation/delay, we might miss it.
+        // We will try one quick re-query after a minimal microtask delay if possible, 
+        // but here we just retry immediately a few times.
+        if (!activeStopLossInput) {
+            // Quick synchronous retry
+             activeStopLossInput = document.querySelector("#stop-loss");
+        }
+
+        if (activeStopLossInput) {
+          const slOffset = parseInt(stopLossOffset, 10);
+          const safeOffset = isNaN(slOffset) ? 2 : slOffset;
+          
+          let stopLossPrice;
+          if (action === 'BUY') {
+            stopLossPrice = price - safeOffset;
+          } else {
+            stopLossPrice = price + safeOffset;
+          }
+          
+          log(`🛑 Stop Loss: ${price} (Entry) ${action === 'BUY' ? '-' : '+'} ${safeOffset} (Offset) = ${stopLossPrice}`, 'info');
+
+          // Always set the value to ensure it's correct, even if it looks like it has a value
+          activeStopLossInput.value = stopLossPrice;
+          activeStopLossInput.dispatchEvent(new Event('input', { bubbles: true }));
+          activeStopLossInput.dispatchEvent(new Event('change', { bubbles: true }));
+          
+        } else {
+            // Fallback: if input is not found, maybe it takes time to render.
+            // We can't wait too long. We log a warning.
+            log('⚠️ Stop Loss input field not found immediately.', 'warning');
+        }
+      } else {
+        if (stopLossCheckbox && stopLossCheckbox.checked) {
+          stopLossCheckbox.click();
+        }
+      }
+      
+      // Step 5: Click buy or sell button
+      const button = action === 'BUY' 
+        ? document.querySelector("#buy-button")
+        : document.querySelector("#sell-button");
+      
+      if (!button) {
+        throw new Error(`${action} button not found`);
+      }
+      
+      // Click immediately
+      button.click();
+      log(`✅ ${action} executed!`, 'success');
+      
+      // Wait a bit then check status
+      await sleep(1000);
+      updatePositionStatus();
+      
+    } catch (error) {
+      log(`❌ Trade execution failed: ${error.message}`, 'error');
+      // Re-enable auto trading on failure
+      state.autoTrading = true;
+    }
+  }
+
+  // Update position/order status
+  function updatePositionStatus() {
+    try {
+      const openPositionsTab = document.querySelector("#open-positions-tab");
+      const openOrdersTab = document.querySelector("#open-orders-tab");
+      
+      if (openPositionsTab) {
+        const text = openPositionsTab.textContent;
+        const match = text.match(/\((\d+)\)/);
+        const count = match ? parseInt(match[1]) : 0;
+        state.hasOpenPosition = count > 0;
+        
+        // Re-enable auto trading if no open positions or orders
+        if (count === 0 && !state.hasOpenOrder) {
+          if (!state.autoTrading) {
+            state.autoTrading = true;
+            log('✅ Auto-trading re-enabled (no open positions/orders)', 'success');
+          }
+        }
+      }
+      
+      if (openOrdersTab) {
+        const text = openOrdersTab.textContent;
+        const match = text.match(/\((\d+)\)/);
+        const count = match ? parseInt(match[1]) : 0;
+        state.hasOpenOrder = count > 0;
+        
+        // Re-enable auto trading if no open positions or orders
+        if (count === 0 && !state.hasOpenPosition) {
+          if (!state.autoTrading) {
+            state.autoTrading = true;
+            log('✅ Auto-trading re-enabled (no open positions/orders)', 'success');
+          }
+        }
+      }
+      
+    } catch (error) {
+      // Silent fail - elements might not be loaded yet
+    }
+  }
+
+  // Send status update to popup
+  function sendStatusUpdate() {
+    const data = {
+      // Minimal status update
+      isMonitoring: state.isMonitoring
+    };
+    
+    chrome.runtime.sendMessage({
+      type: 'STATUS_UPDATE',
+      data: data
+    }).catch(() => {
+      // Popup might be closed
+    });
+  }
+
+  // Log message
+  function log(message, level = 'info') {
+    console.log(`[Arbitrage Bot] ${message}`);
+    chrome.runtime.sendMessage({
+      type: 'LOG',
+      message: message,
+      level: level
+    }).catch(() => {
+      // Popup might be closed
+    });
+  }
+
+  // Sleep helper
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Message listener
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    
+    if (message.type === 'START_MONITORING') {
+      state.isMonitoring = true;
+      state.threshold = message.settings.threshold || 5;
+      state.priceOffset = message.settings.priceOffset || 0;
+      state.volume = message.settings.volume || 1;
+      state.volumeEnabled = message.settings.volumeEnabled !== undefined ? message.settings.volumeEnabled : true;
+      state.stopLossOffset = (message.settings.stopLossOffset !== undefined ? message.settings.stopLossOffset : 2);
+      state.stopLossEnabled = message.settings.stopLossEnabled !== undefined ? message.settings.stopLossEnabled : true;
+      state.enableBuy = message.settings.enableBuy !== undefined ? message.settings.enableBuy : true;
+      state.enableSell = message.settings.enableSell !== undefined ? message.settings.enableSell : true;
+      state.useDemo = message.settings.useDemo !== undefined ? message.settings.useDemo : true;
+      state.autoTrading = true;
+      if (state.isRateGold) {
+        startPriceMonitoring();
+      } else if (state.isFarazGold) {
+        startStatusMonitoring();
+      }
+      log(`Monitoring started with threshold=${state.threshold}, volume=${state.volume}, demo=${state.useDemo}, Buy=${state.enableBuy}, Sell=${state.enableSell}`, 'info');
+      sendResponse({ success: true });
+    }
+    
+    else if (message.type === 'STOP_MONITORING') {
+      state.isMonitoring = false;
+      state.autoTrading = false;
+      if (state.priceCheckInterval) {
+        clearInterval(state.priceCheckInterval);
+        state.priceCheckInterval = null;
+      }
+      if (state.priceObserver) {
+        state.priceObserver.disconnect();
+        state.priceObserver = null;
+      }
+      log('Monitoring stopped', 'info');
+      sendResponse({ success: true });
+    }
+    
+    else if (message.type === 'UPDATE_SETTINGS') {
+      state.threshold = message.settings.threshold || 5;
+      state.priceOffset = message.settings.priceOffset || 0;
+      state.volume = message.settings.volume || 1;
+      state.volumeEnabled = message.settings.volumeEnabled !== undefined ? message.settings.volumeEnabled : true;
+      state.stopLossOffset = (message.settings.stopLossOffset !== undefined ? message.settings.stopLossOffset : 2);
+      state.stopLossEnabled = message.settings.stopLossEnabled !== undefined ? message.settings.stopLossEnabled : true;
+      state.enableBuy = message.settings.enableBuy !== undefined ? message.settings.enableBuy : true;
+      state.enableSell = message.settings.enableSell !== undefined ? message.settings.enableSell : true;
+      state.useDemo = message.settings.useDemo !== undefined ? message.settings.useDemo : true;
+      log(`Settings updated: threshold=${state.threshold}, offset=${state.priceOffset}, volume=${state.volume}, slOffset=${state.stopLossOffset}, demo=${state.useDemo}, Buy=${state.enableBuy}, Sell=${state.enableSell}`, 'info');
+      sendResponse({ success: true });
+    }
+    
+    else if (message.type === 'GET_STATUS') {
+      sendResponse({
+        isMonitoring: state.isMonitoring
+      });
+    }
+    
+    else if (message.type === 'TEST_PRICE_READ' && state.isRateGold) {
+      try {
+        const priceElement = findPriceElement();
+        if (priceElement) {
+          const price = parsePrice(priceElement.textContent.trim());
+          sendResponse({ success: true, price: price });
+        } else {
+          sendResponse({ success: false, error: 'Price element not found' });
+        }
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    }
+    
+    else if (message.type === 'TEST_ELEMENTS' && state.isFarazGold) {
+      const elements = [
+        '#volume',
+        '#price',
+        '#stop-loss-checkbox',
+        '#stop-loss',
+        '#buy-button',
+        '#sell-button',
+        '#open-positions-tab',
+        '#open-orders-tab'
+      ];
+      
+      const found = elements.filter(sel => document.querySelector(sel) !== null);
+      sendResponse({ success: found.length > 0, elements: found });
+    }
+    
+    else if (message.type === 'EXECUTE_TRADE' && state.isFarazGold) {
+      const isDemoPage = window.location.href.includes('demo.farazgold.com/room');
+      const intendedDemo = message.useDemo === true;
+      if ((intendedDemo && !isDemoPage) || (!intendedDemo && isDemoPage)) {
+        if (intendedDemo && !isDemoPage) {
+          log('⚠️ دستور معامله نادیده گرفته شد: حالت Demo فعال است اما روی دامنه واقعی هستید. لطفاً تب https://demo.farazgold.com/room را باز کنید یا حالت Demo را غیرفعال کنید.', 'warning');
+        } else if (!intendedDemo && isDemoPage) {
+          log('⚠️ دستور معامله نادیده گرفته شد: حالت Demo غیرفعال است اما روی دامنه دمو هستید. لطفاً تب https://farazgold.com/room را باز کنید یا حالت Demo را فعال کنید.', 'warning');
+        }
+        sendResponse({ success: false, error: 'Domain mismatch: trade ignored' });
+        return true;
+      }
+      executeTrade(message.action, message.price, message.volume, message.volumeEnabled, message.stopLossOffset, message.stopLossEnabled);
+      sendResponse({ success: true });
+    }
+    
+    return true; // Keep channel open for async response
+  });
+
+  // Initialize on load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();

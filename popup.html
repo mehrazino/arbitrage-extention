@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gold Arbitrage Bot</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header" id="header">
+      <h1>⚡ Gold Arbitrage Bot</h1>
+      <div class="status-badge" id="systemStatus">
+        <span class="status-dot"></span>
+        <span class="status-text">Stopped</span>
+      </div>
+    </div>
+
+    <div class="setting-row checkbox-row dev-mode-row">
+      <input type="checkbox" id="developerMode">
+      <label for="developerMode">Minimal Mode</label>
+    </div>
+
+    <!-- Settings Section -->
+    <div class="section" id="settingsSection">
+      <h2>⚙️ Settings</h2>
+      
+      <div class="setting-row">
+        <label for="volumeInput">Volume</label>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="volumeEnabled" checked>
+          <input type="number" id="volumeInput" min="1" value="1" step="1">
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <label for="priceThreshold">Price Change Threshold</label>
+        <input type="number" id="priceThreshold" min="1" value="5" step="1">
+      </div>
+
+      <div class="setting-row">
+        <label for="priceOffset">Price Offset (+/-)</label>
+        <input type="number" id="priceOffset" min="0" value="0" step="1">
+      </div>
+
+      <div class="setting-row">
+        <label>Trade Types</label>
+        <div style="display:flex;gap:12px;">
+          <div style="display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="enableBuy" checked>
+            <label for="enableBuy" style="margin:0;font-size:0.9em;">Buy</label>
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="enableSell" checked>
+            <label for="enableSell" style="margin:0;font-size:0.9em;">Sell</label>
+          </div>
+        </div>
+      </div>
+      
+      <div class="setting-row">
+        <label for="stopLossOffset">Stop-Loss Offset</label>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="stopLossEnabled" checked>
+          <input type="number" id="stopLossOffset" min="0" value="2" step="1">
+        </div>
+      </div>
+
+      <div class="setting-row checkbox-row">
+        <input type="checkbox" id="useDemoMode" checked>
+        <label for="useDemoMode">Use demo.farazgold.com</label>
+      </div>
+    </div>
+
+    <!-- Live Monitor Section -->
+    <!-- Removed by user request -->
+
+    <!-- Control Buttons -->
+    <div class="section" id="controlsSection">
+      <div class="button-group">
+        <button id="startBtn" class="btn btn-primary">
+          Start Monitoring
+        </button>
+        <button id="stopBtn" class="btn btn-secondary" disabled>
+          Stop
+        </button>
+        <button id="testBtn" class="btn btn-test">
+          Test Connection
+        </button>
+      </div>
+    </div>
+
+    <!-- Logs Section -->
+    <div class="section" id="logsSection">
+      <div class="logs-header">
+        <h2>📝 Activity Logs</h2>
+        <button id="clearLogsBtn" class="btn btn-small">Clear</button>
+      </div>
+      <div class="logs-container" id="logsContainer">
+        <div class="log-item log-info">
+          <span class="log-time">--:--:--.---</span>
+          <span class="log-message">System ready. Click "Start Monitoring" to begin.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer" id="footer">
+      <span>Version 5</span>
+      <span>|</span>
+      <span>By "Amir"</span>
+      <!-- <span>|</span> -->
+      <!-- <span id="lastUpdate">Time: --</span> -->
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
